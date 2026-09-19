@@ -17,8 +17,8 @@ class LiveSurfaceApp(EClient, EWrapper):
 
     def __init__(self):
         EClient.__init__(self, self)
-        self.iv_dict = {} # based on requestID. create IV req from server, each ID maps to a vol
-        self.id_map = {} # reqID -> (strikePrice, Expr)
+        self.iv_dict = {} # reqId -> impledVol. based on requestID. create IV req from server, each ID maps to a vol
+        self.id_map = {} # reqId -> (strikePrice, Expr)
         self.expirations = []
         self.strikes = []
         self.spot_price = 0
@@ -41,7 +41,7 @@ class LiveSurfaceApp(EClient, EWrapper):
         if reqId == 999 and tickType in [4, 9] and price > 0:
             self.spot_price = price
 
-    def securityDefinitionOptionParameter(self, reqId, exchange, underlyingConId,tradingclass, multiplier, expirations, strikes):
+    def securityDefinitionOptionParameter(self, reqId, exchange, underlyingConId, tradingclass, multiplier, expirations, strikes):
         if exchange == "SMART":
             self.expirations = sorted(list(expirations))
             self.strikes = sorted(list(strikes))
@@ -50,4 +50,59 @@ class LiveSurfaceApp(EClient, EWrapper):
     def tickOptionComputation(self, reqId, tickType, tickAttrib, impledVol, delta, optPrice, pvDividend, gamma, vega, theta, underlyingPrice):
         if tickType == 13 and impledVol is not None:
             self.iv_dict[reqId] = impledVol
-            
+
+    def run_loop(app):
+        app.run()
+
+    def start_app(symbol="SPY"):
+        app = LiveSurfaceApp()
+        app.connect('127.0.0.1', 7497, clientId=35) #clientId random number?
+
+        api_thread = threading.Thread(target=run_loop, args={app,}, daemon=True)
+        api_thread.start()
+        time.sleep(1)
+
+        underlying = Contract()
+        underlying.symbol = symbol
+        underlying.secType = 'STK'
+        underlying.exchange = 'SMART'
+        underlying.currency = 'USD'
+
+        app.reqContractDetails(1, underlying) # reqId = 1, request contractId
+        app.resolve.wait(timeout=5)
+
+        app.reqMktData(999, underlying, "", False, False, []) # reqId = 999, request data for underlying contract
+        while app.spot_price == 0: # wait until spot price recieved
+            time.sleep(.1)
+
+        spot = app.spot_price
+
+        app.reqSecDefOptParams(2, symbol, "", "STK", app.underlying_conId)
+        app.chain_resolved.wait(timeout=5) 
+        # notice in both reqContractDetails and here, we set threading event to wait. 
+        # when server response, we set it and we have pass-through so we continue with the program
+
+        today = time.strftime("%Y%m%d")
+        target_exps = [e for e in app.expirations if e >= today][:6] # filter all exprs by today, ensure we dont have expr for yesterday
+        target_strikes = [s for s in app.strikes if spot * .98 <= s <= spot * 1.02] # pull strikes around the money
+
+        req_id = 1000
+        for exp in target_exps:
+            for strike in target_strikes:
+                opt = Contract()
+                opt.symbol = symbol
+                opt.secType = 'OPT'
+                opt.exchange = 'SMART'
+                opt.currency = 'USD'
+                opt.lastTradeDateOrContractMonth = exp
+                opt.strike = strike
+                opt.right = 'C' if strike >= spot else 'P'
+                app.id_map[req_id] = (exp, strike)
+
+                # tickType 106 = IV
+                app.reqMktData(req_id, opt, "106", False, False, [])
+                req_id += 1
+                time.sleep(.1)
+                
+        return app
+
