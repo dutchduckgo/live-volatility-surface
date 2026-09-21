@@ -1,7 +1,7 @@
 import threading
 import time
 import pandas as pd
-import numpy
+import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.widgets import Button
@@ -69,7 +69,7 @@ class LiveSurfaceApp(EClient, EWrapper):
         underlying.currency = 'USD'
 
         app.reqContractDetails(1, underlying) # reqId = 1, request contractId
-        app.resolve.wait(timeout=5)
+        app.resolved.wait(timeout=5)
 
         app.reqMktData(999, underlying, "", False, False, []) # reqId = 999, request data for underlying contract
         while app.spot_price == 0: # wait until spot price recieved
@@ -129,12 +129,61 @@ class PlotState:
         ax_button = plt.axes([.42, .03, .12, .04])
         global btn_label
         btn = Button(ax_button, "LOCK UPDATES", color='#1f2329', hovercolor="#2d333b")
-        btn_label = btn_label
+        btn_label = btn.label
         btn_label.set_color('white')
         btn_label.set_fontsize(9)
         btn.on_clicked(state.toggle)
 
         print(" --- Live Implied Volatility Surface Started --- ")
-        
+
+        try:
+            while True:
+                if not state.is_locked:
+                    current_data = []
+                    req_ids = list(app.iv_dict.keys()) # getting the keys (reqId)
+                    for rid in req_ids:
+                        iv = app.iv_dict[rid]
+                        exp, strike = app.id_map[rid]
+                        current_data.append({'Expiry': exp, 'Strike': strike, 'IV': iv})
+
+                    # Threshold for visualizations
+                    if len(current_data) > 10:
+                        df = pd.DataFrame(current_data)
+                        pivot = df.pivot_table(index='Expiry', columns='Strike', values='IV').sort_index().sort_index(axis=1)
+                        pivot = pivot.interpolate(method='linear', axis=0).bfill().ffill() # Draw a smooth surface using discrete strikes. We have to interpolate.
+
+                        X, Y_idx = np.meshgrid(pivot.columns, np.arage(len(pivot.index)))
+                        Z = pivot.values
+
+                        curr_evel, curr_azim = ax_3d.elev, ax_3d.azim
+
+                        ax_3d.clear()
+                        ax_3d.set_facecolor('#0b0d0f')
+                        ax_3d.plot_surface(X, Y_idx, Z, cmap='magma', edgecolor='white', lw=.1, alpha=.9)
+
+                        ax_3d.set_yticks(np.arange(len(pivot.index)))
+                        ax_3d.setyticklabels(pivot.index)
+                        ax_3d.set_title(f"Live Volatility Surface | {time.strftime(('%H:%M:%S'))}", color='white')
+                        ax_3d.view_init(elev=curr_evel, azim=curr_azim)
+
+                        ax_skew.clear()
+                        ax_skew.set_facecolor('#161b22')
+                        nearest_exp = pivot.index[0]
+                        skew_data = pivot.iloc[0]
+                        ax_skew.set_title(f"FRONT-MONTH SKEW {nearest_exp}", color='white')
+                        ax_skew.axvline(x=app.spot_price, color='#ff3e3e', linestyle='--')
+                        ax_skew.plot(skew_data.index, skew_data.values, marker='o', color='#00f2ff')
+
+                plt.pause(.5)
+        except KeyboardInterrupt:
+            app.disconnect()
+            plt.close()
+
+if __name__ == '__main__':
+    app_instance = start_app()
+    print("App Started")
+    time.sleep(10)
+    live_desktop_plot(app_instance)
+
 
     
