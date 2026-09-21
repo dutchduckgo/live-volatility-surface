@@ -51,60 +51,60 @@ class LiveSurfaceApp(EClient, EWrapper):
         if tickType == 13 and impledVol is not None:
             self.iv_dict[reqId] = impledVol
 
-    def run_loop(app):
-        app.run()
+def run_loop(app):
+    app.run()
 
-    def start_app(symbol="SPY"):
-        app = LiveSurfaceApp()
-        app.connect('127.0.0.1', 7497, clientId=35) #clientId random number?
+def start_app(symbol="SPY"):
+    app = LiveSurfaceApp()
+    app.connect('127.0.0.1', 7497, clientId=35) #clientId random number?
 
-        api_thread = threading.Thread(target=run_loop, args={app,}, daemon=True)
-        api_thread.start()
-        time.sleep(1)
+    api_thread = threading.Thread(target=run_loop, args=(app,), daemon=True)
+    api_thread.start()
+    time.sleep(1)
 
-        underlying = Contract()
-        underlying.symbol = symbol
-        underlying.secType = 'STK'
-        underlying.exchange = 'SMART'
-        underlying.currency = 'USD'
+    underlying = Contract()
+    underlying.symbol = symbol
+    underlying.secType = 'STK'
+    underlying.exchange = 'SMART'
+    underlying.currency = 'USD'
 
-        app.reqContractDetails(1, underlying) # reqId = 1, request contractId
-        app.resolved.wait(timeout=5)
+    app.reqContractDetails(1, underlying) # reqId = 1, request contractId
+    app.resolved.wait(timeout=5)
 
-        app.reqMktData(999, underlying, "", False, False, []) # reqId = 999, request data for underlying contract
-        while app.spot_price == 0: # wait until spot price recieved
+    app.reqMktData(999, underlying, "", False, False, []) # reqId = 999, request data for underlying contract
+    while app.spot_price == 0: # wait until spot price recieved
+        time.sleep(.1)
+
+    spot = app.spot_price
+
+    app.reqSecDefOptParams(2, symbol, "", "STK", app.underlying_conId)
+    app.chain_resolved.wait(timeout=5) 
+    # notice in both reqContractDetails and here, we set threading event to wait. 
+    # when server response, we set it and we have pass-through so we continue with the program
+
+    today = time.strftime("%Y%m%d")
+    target_exps = [e for e in app.expirations if e >= today][:6] # filter all exprs by today, ensure we dont have expr for yesterday
+    target_strikes = [s for s in app.strikes if spot * .98 <= s <= spot * 1.02] # pull strikes around the money
+
+    req_id = 1000
+    for exp in target_exps:
+        for strike in target_strikes:
+            opt = Contract()
+            opt.symbol = symbol
+            opt.secType = 'OPT'
+            opt.exchange = 'SMART'
+            opt.currency = 'USD'
+            opt.lastTradeDateOrContractMonth = exp
+            opt.strike = strike
+            opt.right = 'C' if strike >= spot else 'P'
+            app.id_map[req_id] = (exp, strike)
+
+            # tickType 106 = IV
+            app.reqMktData(req_id, opt, "106", False, False, [])
+            req_id += 1
             time.sleep(.1)
 
-        spot = app.spot_price
-
-        app.reqSecDefOptParams(2, symbol, "", "STK", app.underlying_conId)
-        app.chain_resolved.wait(timeout=5) 
-        # notice in both reqContractDetails and here, we set threading event to wait. 
-        # when server response, we set it and we have pass-through so we continue with the program
-
-        today = time.strftime("%Y%m%d")
-        target_exps = [e for e in app.expirations if e >= today][:6] # filter all exprs by today, ensure we dont have expr for yesterday
-        target_strikes = [s for s in app.strikes if spot * .98 <= s <= spot * 1.02] # pull strikes around the money
-
-        req_id = 1000
-        for exp in target_exps:
-            for strike in target_strikes:
-                opt = Contract()
-                opt.symbol = symbol
-                opt.secType = 'OPT'
-                opt.exchange = 'SMART'
-                opt.currency = 'USD'
-                opt.lastTradeDateOrContractMonth = exp
-                opt.strike = strike
-                opt.right = 'C' if strike >= spot else 'P'
-                app.id_map[req_id] = (exp, strike)
-
-                # tickType 106 = IV
-                app.reqMktData(req_id, opt, "106", False, False, [])
-                req_id += 1
-                time.sleep(.1)
-
-        return app
+    return app
 
 class PlotState:
 
@@ -116,68 +116,68 @@ class PlotState:
         btn_label.set_text("UNLOCK UPDATES" if self.is_locked else "LOCK UPDATES")
         plt.draw()
 
-    def live_desktop_plot(app):
-        plt.ion()
-        fig = plt.figure(figsize=(16, 9))
-        fig.canvas.manager.set_window_title("Life Volalility Surface")
-        fig.patch.set_facecolor("#0b0d0f")
+def live_desktop_plot(app):
+    plt.ion()
+    fig = plt.figure(figsize=(16, 9))
+    fig.canvas.manager.set_window_title("Life Volalility Surface")
+    fig.patch.set_facecolor("#0b0d0f")
 
-        ax_3d = plt.subplot2grid((1, 3), (0, 0), colspan=2, projection='3d')
-        ax_skew = plt.subplot2grid((1, 3), (0, 2))
+    ax_3d = plt.subplot2grid((1, 3), (0, 0), colspan=2, projection='3d')
+    ax_skew = plt.subplot2grid((1, 3), (0, 2))
 
-        state = PlotState()
-        ax_button = plt.axes([.42, .03, .12, .04])
-        global btn_label
-        btn = Button(ax_button, "LOCK UPDATES", color='#1f2329', hovercolor="#2d333b")
-        btn_label = btn.label
-        btn_label.set_color('white')
-        btn_label.set_fontsize(9)
-        btn.on_clicked(state.toggle)
+    state = PlotState()
+    ax_button = plt.axes([.42, .03, .12, .04])
+    global btn_label
+    btn = Button(ax_button, "LOCK UPDATES", color='#1f2329', hovercolor="#2d333b")
+    btn_label = btn.label
+    btn_label.set_color('white')
+    btn_label.set_fontsize(9)
+    btn.on_clicked(state.toggle)
 
-        print(" --- Live Implied Volatility Surface Started --- ")
+    print(" --- Live Implied Volatility Surface Started --- ")
 
-        try:
-            while True:
-                if not state.is_locked:
-                    current_data = []
-                    req_ids = list(app.iv_dict.keys()) # getting the keys (reqId)
-                    for rid in req_ids:
-                        iv = app.iv_dict[rid]
-                        exp, strike = app.id_map[rid]
-                        current_data.append({'Expiry': exp, 'Strike': strike, 'IV': iv})
+    try:
+        while True:
+            if not state.is_locked:
+                current_data = []
+                req_ids = list(app.iv_dict.keys()) # getting the keys (reqId)
+                for rid in req_ids:
+                    iv = app.iv_dict[rid]
+                    exp, strike = app.id_map[rid]
+                    current_data.append({'Expiry': exp, 'Strike': strike, 'IV': iv})
 
-                    # Threshold for visualizations
-                    if len(current_data) > 10:
-                        df = pd.DataFrame(current_data)
-                        pivot = df.pivot_table(index='Expiry', columns='Strike', values='IV').sort_index().sort_index(axis=1)
-                        pivot = pivot.interpolate(method='linear', axis=0).bfill().ffill() # Draw a smooth surface using discrete strikes. We have to interpolate.
+                # Threshold for visualizations
+                if len(current_data) > 10:
+                    df = pd.DataFrame(current_data)
+                    pivot = df.pivot_table(index='Expiry', columns='Strike', values='IV').sort_index().sort_index(axis=1)
+                    pivot = pivot.interpolate(method='linear', axis=0).bfill().ffill() # Draw a smooth surface using discrete strikes. We have to interpolate.
 
-                        X, Y_idx = np.meshgrid(pivot.columns, np.arage(len(pivot.index)))
-                        Z = pivot.values
+                    X, Y_idx = np.meshgrid(pivot.columns, np.arange(len(pivot.index)))
+                    Z = pivot.values
 
-                        curr_evel, curr_azim = ax_3d.elev, ax_3d.azim
+                    curr_evel, curr_azim = ax_3d.elev, ax_3d.azim
 
-                        ax_3d.clear()
-                        ax_3d.set_facecolor('#0b0d0f')
-                        ax_3d.plot_surface(X, Y_idx, Z, cmap='magma', edgecolor='white', lw=.1, alpha=.9)
+                    ax_3d.clear()
+                    ax_3d.set_facecolor('#0b0d0f')
+                    ax_3d.plot_surface(X, Y_idx, Z, cmap='magma', edgecolor='white', lw=.1, alpha=.9)
 
-                        ax_3d.set_yticks(np.arange(len(pivot.index)))
-                        ax_3d.setyticklabels(pivot.index)
-                        ax_3d.set_title(f"Live Volatility Surface | {time.strftime(('%H:%M:%S'))}", color='white')
-                        ax_3d.view_init(elev=curr_evel, azim=curr_azim)
+                    ax_3d.set_yticks(np.arange(len(pivot.index)))
+                    ax_3d.set_yticklabels(pivot.index)
+                    ax_3d.set_title(f"Live Volatility Surface | {time.strftime(('%H:%M:%S'))}", color='white')
+                    ax_3d.view_init(elev=curr_evel, azim=curr_azim)
 
-                        ax_skew.clear()
-                        ax_skew.set_facecolor('#161b22')
-                        nearest_exp = pivot.index[0]
-                        skew_data = pivot.iloc[0]
-                        ax_skew.set_title(f"FRONT-MONTH SKEW {nearest_exp}", color='white')
-                        ax_skew.axvline(x=app.spot_price, color='#ff3e3e', linestyle='--')
-                        ax_skew.plot(skew_data.index, skew_data.values, marker='o', color='#00f2ff')
+                    ax_skew.clear()
+                    ax_skew.set_facecolor('#161b22')
+                    nearest_exp = pivot.index[0]
+                    skew_data = pivot.iloc[0]
+                    ax_skew.set_title(f"FRONT-MONTH SKEW {nearest_exp}", color='white')
+                    ax_skew.axvline(x=app.spot_price, color='#ff3e3e', linestyle='--')
+                    ax_skew.plot(skew_data.index, skew_data.values, marker='o', color='#00f2ff')
 
-                plt.pause(.5)
-        except KeyboardInterrupt:
-            app.disconnect()
-            plt.close()
+            plt.pause(.5)
+    except KeyboardInterrupt:
+        app.disconnect()
+        plt.close()
 
 if __name__ == '__main__':
     app_instance = start_app()
