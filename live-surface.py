@@ -1,3 +1,4 @@
+import sys
 import threading
 import time
 import pandas as pd
@@ -38,7 +39,8 @@ class LiveSurfaceApp(EClient, EWrapper):
         self.resolved.set()
 
     def tickPrice(self, reqId, tickType, price, attrib):
-        if reqId == 999 and tickType in [4, 9] and price > 0:
+        # 4/9 = live last/close, 68/75 = delayed last/close (no API market data subscription)
+        if reqId == 999 and tickType in [4, 9, 68, 75] and price > 0:
             self.spot_price = price
 
     def securityDefinitionOptionParameter(self, reqId, exchange, underlyingConId, tradingclass, multiplier, expirations, strikes):
@@ -48,7 +50,8 @@ class LiveSurfaceApp(EClient, EWrapper):
             self.chain_resolved.set()
 
     def tickOptionComputation(self, reqId, tickType, tickAttrib, impledVol, delta, optPrice, pvDividend, gamma, vega, theta, underlyingPrice):
-        if tickType == 13 and impledVol is not None:
+        # 13 = live model IV, 53 = delayed model IV
+        if tickType in [13, 53] and impledVol is not None:
             self.iv_dict[reqId] = impledVol
 
 def run_loop(app):
@@ -56,11 +59,14 @@ def run_loop(app):
 
 def start_app(symbol="SPY"):
     app = LiveSurfaceApp()
-    app.connect('127.0.0.1', 7497, clientId=35) #clientId random number?
+    app.connect('127.0.0.1', 7496, clientId=35) # 7496 = TWS live, 7497 = TWS paper
 
     api_thread = threading.Thread(target=run_loop, args=(app,), daemon=True)
     api_thread.start()
     time.sleep(1)
+
+    # 1 = live, 3 = delayed. Delayed works without an API market data subscription.
+    app.reqMarketDataType(3)
 
     underlying = Contract()
     underlying.symbol = symbol
@@ -72,7 +78,11 @@ def start_app(symbol="SPY"):
     app.resolved.wait(timeout=5)
 
     app.reqMktData(999, underlying, "", False, False, []) # reqId = 999, request data for underlying contract
+    deadline = time.time() + 15
     while app.spot_price == 0: # wait until spot price recieved
+        if time.time() > deadline:
+            app.disconnect()
+            raise RuntimeError(f"No price for {symbol} after 15s. Check TWS market data subscriptions.")
         time.sleep(.1)
 
     spot = app.spot_price
@@ -105,6 +115,54 @@ def start_app(symbol="SPY"):
             time.sleep(.1)
 
     return app
+
+# Offline stand-in for LiveSurfaceApp. The plot loop only reads iv_dict, id_map and
+# spot_price, so a synthetic feed is enough to develop the visuals with markets closed.
+class MockSurfaceApp:
+
+    def __init__(self, spot=773.38, n_exps=6, n_strikes=17):
+        self.iv_dict = {}
+        self.id_map = {}
+        self.spot_price = spot
+        self.base_spot = spot
+        self._stop = threading.Event()
+
+        # Weekly expirations starting next Friday, in the same YYYYMMDD form TWS returns
+        now = time.time()
+        days_to_fri = (4 - time.localtime(now).tm_wday) % 7 or 7
+        self.expirations = [time.strftime("%Y%m%d", time.localtime(now + (days_to_fri + 7 * i) * 86400))
+                            for i in range(n_exps)]
+        self.strikes = [round(spot) + k for k in range(-(n_strikes // 2), n_strikes // 2 + 1)]
+
+        req_id = 1000
+        for exp in self.expirations:
+            for strike in self.strikes:
+                self.id_map[req_id] = (exp, strike)
+                req_id += 1
+
+    def _iv(self, exp_idx, strike, vol_level):
+        # Log-moneyness smile: puts carry a premium, wings turn up, IV rises with tenor
+        m = np.log(strike / self.spot_price)
+        t = (exp_idx + 1) * 7 / 365
+        return max(.05, vol_level - 1.1 * m + 7.0 * m ** 2 + .04 * np.sqrt(t / (7 / 365)))
+
+    def _feed(self):
+        vol_level = .14
+        while not self._stop.is_set():
+            # Random walk the overall vol level and spot so the surface visibly breathes
+            vol_level = float(np.clip(vol_level + np.random.normal(0, .0015), .10, .25))
+            self.spot_price = self.base_spot * (1 + np.random.normal(0, .0004))
+            for req_id, (exp, strike) in self.id_map.items():
+                exp_idx = self.expirations.index(exp)
+                self.iv_dict[req_id] = self._iv(exp_idx, strike, vol_level) + np.random.normal(0, .002)
+            time.sleep(.4)
+
+    def start(self):
+        threading.Thread(target=self._feed, daemon=True).start()
+        return self
+
+    def disconnect(self):
+        self._stop.set()
 
 class PlotState:
 
@@ -180,9 +238,14 @@ def live_desktop_plot(app):
         plt.close()
 
 if __name__ == '__main__':
-    app_instance = start_app()
-    print("App Started")
-    time.sleep(10)
+    if '--mock' in sys.argv:
+        print("Running on simulated data (no TWS connection)")
+        app_instance = MockSurfaceApp().start()
+        time.sleep(1)
+    else:
+        app_instance = start_app()
+        print("App Started")
+        time.sleep(10)
     live_desktop_plot(app_instance)
 
 
